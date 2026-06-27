@@ -130,13 +130,58 @@ step "12. tests/ directory has ≥5 test files"
 COUNT=$(find "$ROOT/tests" -name '*.test.ts' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$COUNT" -ge 5 ]] && ok || bad "test-file-count:$COUNT"
 
-step "13. README documents the safety boundary"
+step "13a. api/cache.ts + errors.ts present + exported"
+miss=""
+[[ -f "$ROOT/src/api/cache.ts" ]] || miss="$miss missing-cache"
+[[ -f "$ROOT/src/api/errors.ts" ]] || miss="$miss missing-errors"
+grep -q "asyncMemo" "$ROOT/src/api/cache.ts" || miss="$miss no-async-memo"
+grep -q "export class Lru" "$ROOT/src/api/cache.ts" || miss="$miss no-lru-class"
+grep -q "GraphQLAuthError" "$ROOT/src/api/errors.ts" || miss="$miss no-graphql-auth-err"
+grep -q "RestAuthError" "$ROOT/src/api/errors.ts" || miss="$miss no-rest-auth-err"
+grep -q "RateLimitExceededError" "$ROOT/src/api/errors.ts" || miss="$miss no-rate-limit-err"
+# graphql-client uses the typed errors (not raw Error throws)
+grep -q "GraphQLAuthError" "$ROOT/src/api/graphql-client.ts" || miss="$miss client-not-using-typed-errors"
+[[ -z "$miss" ]] && ok || bad "$miss"
+
+step "13b. npm pack stays within size budget (regression gate)"
+miss=""
+# Pull current package size in kB. The baseline at iter-5 was ~104 kB
+# packed / 380 kB unpacked / 118 files. We anchor at 120 kB / 460 kB /
+# 130 files — leaves headroom for a few more modules but trips if the
+# tarball is bloated by a stale dist/, accidental fixtures, etc.
+PACK_INFO=$(cd "$ROOT" && npm pack --dry-run 2>&1 || true)
+PACKED_KB=$(echo "$PACK_INFO" | grep -E "package size:" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+UNPACKED_KB=$(echo "$PACK_INFO" | grep -E "unpacked size:" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+FILE_COUNT=$(echo "$PACK_INFO" | grep -E "total files:" | grep -oE "[0-9]+" | head -1)
+# Convert decimal kB to integer (truncate decimal). bash can't compare
+# floats; truncate to ints for the comparison.
+PACKED_INT=${PACKED_KB%.*}
+UNPACKED_INT=${UNPACKED_KB%.*}
+[[ -n "$PACKED_INT" && "$PACKED_INT" -le 120 ]] || miss="$miss packed-too-big:${PACKED_KB}kB-cap-120"
+[[ -n "$UNPACKED_INT" && "$UNPACKED_INT" -le 460 ]] || miss="$miss unpacked-too-big:${UNPACKED_KB}kB-cap-460"
+[[ -n "$FILE_COUNT" && "$FILE_COUNT" -le 130 ]] || miss="$miss file-count-too-high:${FILE_COUNT}-cap-130"
+# Refuse to ship a .env / nested *.tgz / fixtures/real/ in the tarball.
+# Only inspect file-listing lines ("npm notice <kB> <path>"), NOT the
+# trailing summary which prints the tarball's own name.
+FILE_LINES=$(echo "$PACK_INFO" | grep -E "^npm notice [0-9]+(\.[0-9]+)?(kB|B) ")
+echo "$FILE_LINES" | grep -qE " \.env( |$)" && miss="$miss .env-in-tarball" || true
+echo "$FILE_LINES" | grep -qE "\.tgz( |$)" && miss="$miss tgz-in-tarball" || true
+echo "$FILE_LINES" | grep -qE "fixtures/real/" && miss="$miss real-fixtures-in-tarball" || true
+[[ -z "$miss" ]] && ok || bad "$miss"
+
+step "14. README documents the safety boundary"
 F="$ROOT/README.md"
 miss=""
 [[ -f "$F" ]] || miss="$miss no-readme"
 grep -qi "safety" "$F" || miss="$miss no-safety-section"
 grep -qi "HACKERONE_API_KEY" "$F" || miss="$miss no-key-env-doc"
 grep -qi "mock" "$F" || miss="$miss no-mock-doc"
+[[ -z "$miss" ]] && ok || bad "$miss"
+
+step "15. README documents the session-cookie operator workflow"
+F="$ROOT/README.md"
+miss=""
+grep -qi "HACKERONE_SESSION_COOKIE" "$F" || miss="$miss no-session-cookie-doc"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
 printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"

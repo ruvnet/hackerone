@@ -47,6 +47,8 @@ import {
   SafetyViolationError,
   validateProgramHandle,
 } from '../safety.js';
+import { Lru, asyncMemo } from './cache.js';
+import { GraphQLAuthError, GraphQLQueryError, HackerOneApiError, NotFoundError, RateLimitExceededError } from './errors.js';
 
 /**
  * Strip Basic-auth wrapper or `user:` prefix if a caller passed one.
@@ -85,6 +87,8 @@ export class HackerOneGraphQLClient implements ApiClient {
   private readonly timeoutMs: number;
   private readonly rateLimiter: RateLimiter;
   private readonly fetchImpl: typeof fetch;
+  private readonly programCache: Lru<Program>;
+  private readonly cachedGetProgram: (handle: string) => Promise<Program>;
 
   constructor(opts: GraphqlClientOptions) {
     if (!opts.apiKey) {
@@ -102,6 +106,11 @@ export class HackerOneGraphQLClient implements ApiClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.rateLimiter = new RateLimiter(opts.maxCallsPerMin ?? HARD_SAFE_DEFAULTS.maxApiCallsPerMin);
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+    // 60s TTL — short enough that scope changes during a long batch run
+    // get picked up on the next outer invocation; long enough that a
+    // single `triage-batch` call hits the cache for repeat lookups.
+    this.programCache = new Lru<Program>({ maxKeys: 64, ttlMs: 60_000 });
+    this.cachedGetProgram = asyncMemo(this.programCache, (handle) => this._getProgramUncached(handle));
   }
 
   async listPrograms(): Promise<Program[]> {
@@ -118,11 +127,20 @@ export class HackerOneGraphQLClient implements ApiClient {
 
   async getProgram(handle: string): Promise<Program> {
     validateProgramHandle(handle);
+    return this.cachedGetProgram(handle);
+  }
+
+  private async _getProgramUncached(handle: string): Promise<Program> {
     const data = await this.query<{ team: H1Team | null }>(Q_GET_PROGRAM, { handle });
     if (!data.team) {
-      throw new Error(`@metaharness/hackerone: program "${handle}" not found via GraphQL`);
+      throw new NotFoundError(`program "${handle}"`);
     }
     return parseTeam(data.team);
+  }
+
+  /** Diagnostics: cache hit/miss counters. */
+  cacheStats(): { hits: number; misses: number; size: number } {
+    return this.programCache.stats();
   }
 
   async listReports(
@@ -182,7 +200,7 @@ export class HackerOneGraphQLClient implements ApiClient {
   // ────────────────────────────────────────────────────────────────────
   private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
     if (!this.rateLimiter.tryConsume()) {
-      throw new Error('@metaharness/hackerone: rate limit exceeded (token bucket empty)');
+      throw new RateLimitExceededError();
     }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
@@ -205,21 +223,15 @@ export class HackerOneGraphQLClient implements ApiClient {
       clearTimeout(timer);
     }
     if (!resp.ok) {
-      const hint = resp.status === 401
-        ? ' (hint: GraphQL needs X-Auth-Token, not Basic. Some queries also need a session Cookie.)'
-        : '';
-      throw new Error(
-        `@metaharness/hackerone: graphql POST → HTTP ${resp.status} ${resp.statusText}${hint}`,
-      );
+      if (resp.status === 401) throw new GraphQLAuthError(resp.statusText);
+      throw new HackerOneApiError(`graphql POST → HTTP ${resp.status} ${resp.statusText}`);
     }
     const body = (await resp.json()) as { data?: T; errors?: Array<{ message: string }> };
     if (body.errors?.length) {
-      throw new Error(
-        `@metaharness/hackerone: graphql errors: ${body.errors.map((e) => e.message).join('; ')}`,
-      );
+      throw new GraphQLQueryError(body.errors);
     }
     if (!body.data) {
-      throw new Error('@metaharness/hackerone: graphql returned no data');
+      throw new HackerOneApiError('graphql returned no data');
     }
     return body.data;
   }

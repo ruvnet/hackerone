@@ -224,6 +224,29 @@ The harness resolves `HACKERONE_API_KEY` in priority order:
 
 Get yours at https://hackerone.com/users/<you>/api_tokens.
 
+### Session-cookie workflow (advanced — GraphQL `me` and private programs)
+
+The HackerOne GraphQL endpoint authenticates **public** queries with just
+`X-Auth-Token: <token>` (handled automatically when `HACKERONE_API_KEY`
+is set). But user-bound queries (`me`, private program detail, your
+submitted reports) need the **session cookie** that the web UI sends.
+
+To use those queries from the harness:
+
+1. Log in to https://hackerone.com in a browser
+2. Open DevTools → Application/Storage → Cookies → `hackerone.com`
+3. Copy the value of `_hackerone_session` (or the whole `Cookie:` header)
+4. Export it transiently, never commit:
+
+    ```bash
+    export HACKERONE_SESSION_COOKIE="_hackerone_session=<value>"
+    npx hackerone ping --no-mock --json   # should now report ok=true for `me`
+    npx hackerone scope <your-private-program>
+    ```
+
+The cookie is **never** logged or stored on disk by the harness — same
+treatment as the API key. Sessions expire; refresh by re-extracting.
+
 ### GCP Secret Manager (recommended for prod)
 
 ```bash

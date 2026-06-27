@@ -20,6 +20,7 @@ import {
   validateProgramHandle,
 } from '../safety.js';
 import { toBasicAuthHeader } from './key-source.js';
+import { HackerOneApiError, RateLimitExceededError, RestAuthError } from './errors.js';
 
 const BASE_URL = 'https://api.hackerone.com/v1';
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -110,7 +111,7 @@ export class HackerOneClient implements ApiClient {
   // ────────────────────────────────────────────────────────────────────
   private async get<T>(path: string): Promise<T> {
     if (!this.rateLimiter.tryConsume()) {
-      throw new Error('@metaharness/hackerone: rate limit exceeded (token bucket empty)');
+      throw new RateLimitExceededError();
     }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
@@ -129,15 +130,8 @@ export class HackerOneClient implements ApiClient {
       clearTimeout(timer);
     }
     if (!resp.ok) {
-      // Do NOT include headers in the error message — could leak auth state
-      const hint = resp.status === 401
-        ? ' (hint: HackerOne Basic auth uses <api-identifier>:<api-token>. ' +
-          'Set HACKERONE_API_USERNAME to the API identifier shown at ' +
-          'hackerone.com/users/<you>/api_tokens — NOT your profile username.)'
-        : '';
-      throw new Error(
-        `@metaharness/hackerone: GET ${path} → HTTP ${resp.status} ${resp.statusText}${hint}`,
-      );
+      if (resp.status === 401) throw new RestAuthError(resp.statusText);
+      throw new HackerOneApiError(`GET ${path} → HTTP ${resp.status} ${resp.statusText}`);
     }
     return (await resp.json()) as T;
   }
