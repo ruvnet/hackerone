@@ -31,6 +31,7 @@ import { MockHackerOneClient } from '../api/mock-client.js';
 import type { ApiClient } from '../api/client.js';
 import { triageReport } from '../triage/triage.js';
 import { buildReconPlan, classifyDescription, formatFinding } from '../research/recon.js';
+import { extractAssets, formatAssetListWithBanner } from '../research/asset-list.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -40,7 +41,7 @@ export interface CliResult {
 }
 
 const VALID_SUBS = new Set([
-  'init', 'ping', 'programs', 'scope', 'classify', 'triage', 'triage-batch', 'format', 'help',
+  'init', 'ping', 'programs', 'scope', 'assets', 'classify', 'triage', 'triage-batch', 'format', 'help',
 ]);
 
 const SAMPLE_ENV = `# @metaharness/hackerone — sample env file
@@ -135,7 +136,8 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
     out('  ping                          Verify the API key resolves + connects');
     out('  programs                      List programs accessible to the API key');
     out('  scope <handle>                Researcher recon plan for a program');
-    out('  classify "<description>"      Classify free-text into CWE/OWASP');
+    out('  assets <handle>               Print newline-delimited in-scope assets (pipe-friendly)');
+    out('  classify "<description>"      Classify free-text into CWE/OWASP (--stdin for batch)');
     out('  triage <report-id> [--program H]   Triage one report against history');
     out('  triage-batch <handle>         Triage every open report on a program');
     out('  format <fixture-path>         Format a finding fixture as markdown');
@@ -165,7 +167,8 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
       case 'ping': r = await cmdPing(parsed, out); break;
       case 'programs': r = await cmdPrograms(parsed, out); break;
       case 'scope': r = await cmdScope(parsed, out); break;
-      case 'classify': r = cmdClassify(parsed, out); break;
+      case 'assets': r = await cmdAssets(parsed, out); break;
+      case 'classify': r = await cmdClassify(parsed, out); break;
       case 'triage': r = await cmdTriage(parsed, out); break;
       case 'triage-batch': r = await cmdTriageBatch(parsed, out); break;
       case 'format': r = cmdFormat(parsed, out); break;
@@ -232,6 +235,20 @@ async function cmdScope(args: ParsedArgs, out: (s: string) => void): Promise<Cli
   if (!handle) return { code: 2, lines: ['scope: missing program handle. Usage: scope <handle>'] };
   const { client } = pickClient(args);
   const program = await client.getProgram(handle);
+
+  // --format lines → newline-delimited identifiers, pipe-friendly for recon tools.
+  if (args.flags.format === 'lines') {
+    const text = formatAssetListWithBanner(program, {
+      includeOutOfScope: args.flags['include-out-of-scope'] === true,
+      expandWildcards: args.flags['expand-wildcards'] === true,
+      ...(typeof args.flags.type === 'string'
+        ? { assetTypes: args.flags.type.split(',') }
+        : {}),
+    });
+    out(text);
+    return { code: 0, lines: [] };
+  }
+
   const plan = buildReconPlan(program);
   if (args.flags.json) {
     out(JSON.stringify(plan, null, 2));
@@ -253,9 +270,47 @@ async function cmdScope(args: ParsedArgs, out: (s: string) => void): Promise<Cli
   return { code: 0, lines: [] };
 }
 
-function cmdClassify(args: ParsedArgs, out: (s: string) => void): CliResult {
+async function cmdAssets(args: ParsedArgs, out: (s: string) => void): Promise<CliResult> {
+  const handle = args.positional[0];
+  if (!handle) return { code: 2, lines: ['assets: missing program handle. Usage: assets <handle>'] };
+  const { client } = pickClient(args);
+  const program = await client.getProgram(handle);
+  const includeOutOfScope = args.flags['include-out-of-scope'] === true;
+  const expandWildcards = args.flags['expand-wildcards'] === true;
+  const assetTypes =
+    typeof args.flags.type === 'string' ? args.flags.type.split(',').map((t) => t.trim()) : undefined;
+
+  if (args.flags.json) {
+    const items = extractAssets(program, {
+      includeOutOfScope,
+      expandWildcards,
+      ...(assetTypes ? { assetTypes } : {}),
+    });
+    out(JSON.stringify({ programHandle: program.handle, count: items.length, assets: items }, null, 2));
+    return { code: 0, lines: [] };
+  }
+
+  // Default: newline-delimited assets with a banner header. The banner is
+  // a comment block (lines start with `#`) so it's a no-op for tools like
+  // Subfinder / Amass / Nuclei that read targets from stdin.
+  const text = formatAssetListWithBanner(program, {
+    includeOutOfScope,
+    expandWildcards,
+    ...(assetTypes ? { assetTypes } : {}),
+  });
+  out(text);
+  return { code: 0, lines: [] };
+}
+
+async function cmdClassify(args: ParsedArgs, out: (s: string) => void): Promise<CliResult> {
+  // --stdin: read one description per line; classify each, JSON-line out.
+  // Useful for piping security scanner alert summaries through batch
+  // classification → CWE/OWASP routing.
+  if (args.flags.stdin === true) {
+    return classifyStdin(args, out);
+  }
   const desc = args.positional.join(' ');
-  if (!desc) return { code: 2, lines: ['classify: pass a description as a positional argument'] };
+  if (!desc) return { code: 2, lines: ['classify: pass a description as a positional argument or --stdin'] };
   const result = classifyDescription(desc);
   if (args.flags.json) {
     out(JSON.stringify(result, null, 2));
@@ -273,6 +328,38 @@ function cmdClassify(args: ParsedArgs, out: (s: string) => void): CliResult {
     }
   }
   return { code: result ? 0 : 1, lines: [] };
+}
+
+/**
+ * Read newline-delimited descriptions from stdin; classify each; emit
+ * JSON-line output (one object per input line). Skip blank lines and
+ * shell comments (lines starting with `#`).
+ */
+async function classifyStdin(args: ParsedArgs, out: (s: string) => void): Promise<CliResult> {
+  const wantJson = args.flags.json !== false; // JSON-line is the default in stdin mode
+  // Read all of stdin synchronously — descriptions are short, batches small.
+  const raw = await new Promise<string>((resolveStdin) => {
+    let buf = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (chunk: string) => { buf += chunk; });
+    process.stdin.on('end', () => resolveStdin(buf));
+  });
+  const inputs = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  let anyHit = false;
+  for (const line of inputs) {
+    const result = classifyDescription(line);
+    if (result) anyHit = true;
+    if (wantJson) {
+      out(JSON.stringify({ input: line, classification: result }));
+    } else {
+      out(`${line} → ${result ? `${result.cwe} (${result.name}) @ ${result.confidence.toFixed(2)}` : 'unclassified'}`);
+    }
+  }
+  // Return 0 if at least one was classified (lenient for batch use).
+  return { code: anyHit ? 0 : 1, lines: [] };
 }
 
 async function cmdTriage(args: ParsedArgs, out: (s: string) => void): Promise<CliResult> {

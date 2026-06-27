@@ -61,6 +61,50 @@ npx hackerone classify "Reflected XSS via search query parameter"
 npx hackerone format fixtures/example-finding.json
 ```
 
+### Recon pipeline (UNIX-style stdin/stdout)
+
+The `assets` subcommand emits newline-delimited in-scope identifiers (with
+a `#`-prefixed banner that recon tools ignore), so the harness drops
+straight into Subfinder, Amass, Nuclei, httpx, etc.:
+
+```bash
+# Subdomain enumeration on in-scope wildcards
+npx hackerone assets security --expand-wildcards | subfinder -dL -
+
+# Active enum
+npx hackerone assets <handle> --type URL,DOMAIN --expand-wildcards | amass enum -df -
+
+# Nuclei against the live targets (after subdomain enum + httpx probe)
+npx hackerone assets <handle> --expand-wildcards \
+  | subfinder -dL - \
+  | httpx -silent \
+  | nuclei -t cves/ -severity high,critical
+
+# Mobile-only — no URL noise
+npx hackerone assets <handle> --type IOS_APP_STORE,ANDROID_PLAY_STORE
+```
+
+By default the asset list is **in-scope only** — pass
+`--include-out-of-scope` to add a flagged `# OUT-OF-SCOPE` block (still
+inert for recon tools, but informative for humans). The `--type` filter
+accepts a comma-separated list of HackerOne asset types.
+
+### Batch classification from stdin
+
+`classify --stdin` reads one finding description per line, emits one
+JSON object per line (`{input, classification}`). Useful for piping
+scanner alerts into the CWE/OWASP classifier:
+
+```bash
+# From a security log file
+cat alerts.txt | npx hackerone classify --stdin > classified.jsonl
+
+# From an inline list
+printf "SQL injection on /api\nReflected XSS\n" | npx hackerone classify --stdin
+```
+
+Blank lines and `#`-prefixed comments are skipped.
+
 ## Quick start — defender side
 
 ```bash

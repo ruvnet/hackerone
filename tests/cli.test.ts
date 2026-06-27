@@ -68,4 +68,54 @@ describe('cli dispatch', () => {
     expect(json.mock).toBe(true);
     expect(json.ok).toBe(true);
   });
+
+  it('assets (mock) returns newline-delimited in-scope identifiers with banner', async () => {
+    const r = await dispatch('assets', ['example-program', '--mock-api']);
+    expect(r.code).toBe(0);
+    const text = r.lines.join('\n');
+    expect(text).toContain('@metaharness/hackerone');
+    expect(text).toContain('api.example.com');
+    expect(text).toContain('*.example.com');
+    // Out-of-scope must NOT leak by default
+    expect(text).not.toContain('marketing.example.com');
+  });
+
+  it('assets --include-out-of-scope flags out-of-scope as comment', async () => {
+    const r = await dispatch('assets', [
+      'example-program', '--mock-api', '--include-out-of-scope',
+    ]);
+    expect(r.code).toBe(0);
+    const text = r.lines.join('\n');
+    expect(text).toContain('# OUT-OF-SCOPE');
+    expect(text).toContain('#   marketing.example.com');
+  });
+
+  it('assets --type ANDROID_PLAY_STORE filters to mobile only', async () => {
+    const r = await dispatch('assets', [
+      'example-program', '--mock-api', '--type', 'ANDROID_PLAY_STORE',
+    ]);
+    expect(r.code).toBe(0);
+    const text = r.lines.join('\n');
+    expect(text).toContain('com.example.android');
+    expect(text).not.toContain('api.example.com');
+  });
+
+  it('assets --json returns structured payload', async () => {
+    const r = await dispatch('assets', ['example-program', '--mock-api', '--json']);
+    expect(r.code).toBe(0);
+    const json = JSON.parse(r.lines.join('\n'));
+    expect(json.programHandle).toBe('example-program');
+    expect(Array.isArray(json.assets)).toBe(true);
+    expect(json.count).toBe(json.assets.length);
+  });
+
+  it('scope --format lines produces pipe-friendly output', async () => {
+    const r = await dispatch('scope', [
+      'example-program', '--mock-api', '--format', 'lines',
+    ]);
+    expect(r.code).toBe(0);
+    const text = r.lines.join('\n');
+    expect(text).toContain('# @metaharness/hackerone');
+    expect(text).toContain('api.example.com');
+  });
 });
