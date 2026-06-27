@@ -130,8 +130,13 @@ export class HackerOneClient implements ApiClient {
     }
     if (!resp.ok) {
       // Do NOT include headers in the error message — could leak auth state
+      const hint = resp.status === 401
+        ? ' (hint: HackerOne Basic auth uses <api-identifier>:<api-token>. ' +
+          'Set HACKERONE_API_USERNAME to the API identifier shown at ' +
+          'hackerone.com/users/<you>/api_tokens — NOT your profile username.)'
+        : '';
       throw new Error(
-        `@metaharness/hackerone: GET ${path} → HTTP ${resp.status} ${resp.statusText}`,
+        `@metaharness/hackerone: GET ${path} → HTTP ${resp.status} ${resp.statusText}${hint}`,
       );
     }
     return (await resp.json()) as T;

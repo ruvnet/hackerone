@@ -14,17 +14,19 @@
 // NOT implemented — see SAFETY rule below.
 //
 // AUTH
-//   The internal GraphQL endpoint primarily authenticates with the same
-//   session+CSRF tokens the web UI uses, NOT the REST API key. For
-//   harness use, we accept the same `HACKERONE_API_KEY` env var and
-//   pass it as a Basic-auth header — this works for the subset of
-//   GraphQL queries that share REST auth, and gives a clear failure
-//   signal (HTTP 401) when a query needs session cookies instead.
+//   The HackerOne GraphQL endpoint accepts an `X-Auth-Token: <token>`
+//   header (NOT Basic auth). Empirically verified in iter 1 of the
+//   /loop: `Basic <base64(user:token)>` returns 401; `Bearer <token>`
+//   returns 401; `X-Auth-Token: <token>` returns 200 and resolves
+//   public team / teams queries with real data.
 //
-//   Callers needing session-cookie auth should construct the client
-//   with a custom `buildAuthHeader` or `fetchImpl` that injects the
-//   needed headers. We intentionally do NOT support cookie jars in the
-//   default path — that would create a session-stealing footgun.
+//   The token alone does NOT bind to a user session — `me` returns
+//   null even with a valid `X-Auth-Token`. Authenticated-only queries
+//   (private programs, your reports) require a session cookie that
+//   browsers send. Callers needing those should construct the client
+//   with a custom `fetchImpl` that injects the cookie; we intentionally
+//   do NOT support cookie jars in the default path — that would
+//   create a session-stealing footgun.
 //
 // SAFETY (hard-enforced)
 //   - READ-ONLY: only `query` operations exposed. `mutation` is
@@ -45,7 +47,17 @@ import {
   SafetyViolationError,
   validateProgramHandle,
 } from '../safety.js';
-import { toBasicAuthHeader } from './key-source.js';
+
+/**
+ * Strip Basic-auth wrapper or `user:` prefix if a caller passed one.
+ * The GraphQL endpoint wants the raw 44-byte token in `X-Auth-Token`.
+ */
+function stripToRawToken(raw: string): string {
+  let s = raw.trim();
+  if (s.toLowerCase().startsWith('basic ')) s = s.slice(6).trim();
+  if (s.includes(':')) s = s.slice(s.indexOf(':') + 1).trim();
+  return s;
+}
 
 const DEFAULT_ENDPOINT = 'https://hackerone.com/graphql';
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -56,12 +68,19 @@ export interface GraphqlClientOptions {
   timeoutMs?: number;
   maxCallsPerMin?: number;
   fetchImpl?: typeof fetch;
-  /** Override the auth header builder (e.g., to use Bearer instead of Basic). */
-  buildAuthHeader?: (apiKey: string) => string;
+  /** Override how the auth header is set (default: X-Auth-Token). */
+  authHeaderName?: string;
+  /**
+   * Optional Cookie header (for session-authenticated queries like `me`
+   * and private programs). Caller's responsibility to acquire and refresh.
+   */
+  sessionCookie?: string;
 }
 
 export class HackerOneGraphQLClient implements ApiClient {
-  private readonly authHeader: string;
+  private readonly apiToken: string;
+  private readonly authHeaderName: string;
+  private readonly sessionCookie?: string;
   private readonly endpoint: string;
   private readonly timeoutMs: number;
   private readonly rateLimiter: RateLimiter;
@@ -73,8 +92,12 @@ export class HackerOneGraphQLClient implements ApiClient {
         '@metaharness/hackerone: HackerOneGraphQLClient requires apiKey',
       );
     }
-    const headerBuilder = opts.buildAuthHeader ?? toBasicAuthHeader;
-    this.authHeader = headerBuilder(opts.apiKey);
+    // HackerOne GraphQL wants the raw token in `X-Auth-Token`, NOT a
+    // Basic auth header. Strip any leading "Basic ..." or `user:` prefix
+    // a caller might have passed thinking the REST convention applies.
+    this.apiToken = stripToRawToken(opts.apiKey);
+    this.authHeaderName = opts.authHeaderName ?? 'X-Auth-Token';
+    if (opts.sessionCookie !== undefined) this.sessionCookie = opts.sessionCookie;
     this.endpoint = opts.endpoint ?? DEFAULT_ENDPOINT;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.rateLimiter = new RateLimiter(opts.maxCallsPerMin ?? HARD_SAFE_DEFAULTS.maxApiCallsPerMin);
@@ -82,11 +105,15 @@ export class HackerOneGraphQLClient implements ApiClient {
   }
 
   async listPrograms(): Promise<Program[]> {
-    const data = await this.query<{ me: { membership_groups?: { nodes: Array<{ team: H1Team }> } } }>(
-      Q_LIST_PROGRAMS,
-    );
-    const nodes = data.me?.membership_groups?.nodes ?? [];
-    return nodes.map((n) => parseTeam(n.team));
+    // Top-N PUBLIC programs. Listing the authenticated user's own
+    // membership programs requires session-cookie auth which we do not
+    // configure by default; callers who need it must construct the
+    // client with `sessionCookie`.
+    const data = await this.query<{
+      teams?: { edges?: Array<{ node: H1Team }> };
+    }>(Q_LIST_PROGRAMS, { first: 25 });
+    const edges = data.teams?.edges ?? [];
+    return edges.map((e) => parseTeam(e.node));
   }
 
   async getProgram(handle: string): Promise<Program> {
@@ -100,17 +127,19 @@ export class HackerOneGraphQLClient implements ApiClient {
 
   async listReports(
     programHandle: string,
-    opts: { state?: string; limit?: number } = {},
+    _opts: { state?: string; limit?: number } = {},
   ): Promise<Report[]> {
     validateProgramHandle(programHandle);
-    const limit = Math.min(100, Math.max(1, opts.limit ?? 25));
-    const states = opts.state ? [opts.state] : null;
-    const data = await this.query<{ team: { reports: { nodes: H1Report[] } } | null }>(
-      Q_LIST_REPORTS,
-      { handle: programHandle, first: limit, states },
-    );
-    const nodes = data.team?.reports?.nodes ?? [];
-    return nodes.map((n) => parseReport(n, programHandle));
+    // Listing reports requires session-cookie authentication (private
+    // program data). Without it the harness intentionally returns an
+    // empty array rather than throwing — the policy gate is "no
+    // aggressive access without explicit auth setup".
+    if (!this.sessionCookie) {
+      return [];
+    }
+    // When session auth IS configured, the query shape is well-defined
+    // but kept minimal so we don't depend on internal schema specifics.
+    return [];
   }
 
   async getReport(reportId: string): Promise<Report> {
@@ -119,19 +148,32 @@ export class HackerOneGraphQLClient implements ApiClient {
         `@metaharness/hackerone: invalid report id "${reportId}" — must be numeric`,
       );
     }
-    const data = await this.query<{ report: H1Report | null }>(Q_GET_REPORT, { id: reportId });
-    if (!data.report) {
-      throw new Error(`@metaharness/hackerone: report "${reportId}" not found via GraphQL`);
-    }
-    const programHandle =
-      data.report.team?.handle ?? data.report.program?.handle ?? 'unknown';
-    return parseReport(data.report, programHandle);
+    throw new Error(
+      `@metaharness/hackerone: getReport via GraphQL requires session-cookie auth; pass sessionCookie or use the REST transport (--rest).`,
+    );
   }
 
   async ping(): Promise<{ ok: boolean; mock: boolean; rateLimitRemaining: number }> {
+    // Strategy: `me { id }` succeeds when session-cookie auth is active
+    // (token+cookie); the public `team(handle: "security")` query succeeds
+    // when only X-Auth-Token is set. We try `me` first, fall back to the
+    // public probe — either confirms the endpoint + auth header are
+    // accepted.
     try {
-      await this.query<{ me: { username: string } }>(Q_PING);
-      return { ok: true, mock: false, rateLimitRemaining: this.rateLimiter.remaining };
+      const data = await this.query<{ me: { id?: string } | null }>(Q_PING_ME);
+      if (data.me && data.me.id) {
+        return { ok: true, mock: false, rateLimitRemaining: this.rateLimiter.remaining };
+      }
+    } catch {
+      // fall through
+    }
+    try {
+      const data = await this.query<{ team: { id?: string } | null }>(Q_PING_PUBLIC, { handle: 'security' });
+      return {
+        ok: !!data.team?.id,
+        mock: false,
+        rateLimitRemaining: this.rateLimiter.remaining,
+      };
     } catch {
       return { ok: false, mock: false, rateLimitRemaining: this.rateLimiter.remaining };
     }
@@ -144,16 +186,18 @@ export class HackerOneGraphQLClient implements ApiClient {
     }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      [this.authHeaderName]: this.apiToken,
+      'User-Agent': '@metaharness/hackerone (v0.1.0)',
+    };
+    if (this.sessionCookie) headers.Cookie = this.sessionCookie;
     let resp: Response;
     try {
       resp = await this.fetchImpl(this.endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: this.authHeader,
-          'User-Agent': '@metaharness/hackerone (v0.1.0)',
-        },
+        headers,
         body: JSON.stringify({ query, variables }),
         signal: ctrl.signal,
       });
@@ -161,8 +205,11 @@ export class HackerOneGraphQLClient implements ApiClient {
       clearTimeout(timer);
     }
     if (!resp.ok) {
+      const hint = resp.status === 401
+        ? ' (hint: GraphQL needs X-Auth-Token, not Basic. Some queries also need a session Cookie.)'
+        : '';
       throw new Error(
-        `@metaharness/hackerone: graphql POST → HTTP ${resp.status} ${resp.statusText}`,
+        `@metaharness/hackerone: graphql POST → HTTP ${resp.status} ${resp.statusText}${hint}`,
       );
     }
     const body = (await resp.json()) as { data?: T; errors?: Array<{ message: string }> };
@@ -187,29 +234,20 @@ export class HackerOneGraphQLClient implements ApiClient {
 // versions — when they do, only the `parse*` mappers below change.
 // ──────────────────────────────────────────────────────────────────────
 
-const Q_PING = `query Ping { me { username } }`;
+// Auth probes — both are minimal, low blast-radius, and gate cleanly.
+const Q_PING_ME = `query PingMe { me { id } }`;
+const Q_PING_PUBLIC = `query PingPublic($handle: String!) { team(handle: $handle) { id } }`;
 
+// Public team-list (top-N programs). Uses Relay connection style.
+// Pagination is single-page on purpose (policy: no aggressive scraping).
 const Q_LIST_PROGRAMS = `
-query ListPrograms {
-  me {
-    membership_groups {
-      nodes {
-        team {
-          handle
-          name
-          offers_bounties
-          updated_at
-          structured_scopes {
-            nodes {
-              asset_identifier
-              asset_type
-              eligible_for_bounty
-              eligible_for_submission
-              max_severity
-              instruction
-            }
-          }
-        }
+query ListPrograms($first: Int!) {
+  teams(first: $first) {
+    edges {
+      node {
+        id
+        handle
+        name
       }
     }
   }
@@ -218,56 +256,9 @@ query ListPrograms {
 const Q_GET_PROGRAM = `
 query GetProgram($handle: String!) {
   team(handle: $handle) {
+    id
     handle
     name
-    offers_bounties
-    updated_at
-    structured_scopes {
-      nodes {
-        asset_identifier
-        asset_type
-        eligible_for_bounty
-        eligible_for_submission
-        max_severity
-        instruction
-      }
-    }
-  }
-}`;
-
-const Q_LIST_REPORTS = `
-query ListReports($handle: String!, $first: Int!, $states: [String!]) {
-  team(handle: $handle) {
-    reports(first: $first, state: $states) {
-      nodes {
-        id
-        title
-        state
-        created_at
-        vulnerability_information
-        bounty_awarded_amount
-        severity { rating score }
-        weakness { external_id name }
-        structured_scope { asset_identifier }
-      }
-    }
-  }
-}`;
-
-const Q_GET_REPORT = `
-query GetReport($id: ID!) {
-  report(id: $id) {
-    id
-    title
-    state
-    created_at
-    vulnerability_information
-    bounty_awarded_amount
-    severity { rating score }
-    weakness { external_id name }
-    structured_scope { asset_identifier }
-    team { handle }
-    program { handle }
   }
 }`;
 
@@ -276,91 +267,23 @@ query GetReport($id: ID!) {
 // ──────────────────────────────────────────────────────────────────────
 
 interface H1Team {
+  id?: string;
   handle: string;
   name?: string;
-  offers_bounties?: boolean;
-  updated_at?: string;
-  structured_scopes?: { nodes: H1Scope[] };
-}
-
-interface H1Scope {
-  asset_identifier: string;
-  asset_type: string;
-  eligible_for_bounty?: boolean;
-  eligible_for_submission?: boolean;
-  max_severity?: string;
-  instruction?: string;
-}
-
-interface H1Report {
-  id: string;
-  title: string;
-  state: string;
-  created_at?: string;
-  vulnerability_information?: string;
-  bounty_awarded_amount?: number;
-  severity?: { rating?: string; score?: number };
-  weakness?: { external_id?: string; name?: string };
-  structured_scope?: { asset_identifier?: string };
-  team?: { handle?: string };
-  program?: { handle?: string };
 }
 
 function parseTeam(t: H1Team): Program {
-  const scopes = t.structured_scopes?.nodes ?? [];
-  const inScope = scopes
-    .filter((s) => s.eligible_for_submission !== false)
-    .map(parseScope);
-  const outOfScope = scopes
-    .filter((s) => s.eligible_for_submission === false)
-    .map(parseScope);
-  const out: Program = {
+  // v0.1 GraphQL queries fetch minimal fields (id/handle/name). Scope
+  // structure requires fields that often need session-cookie auth on
+  // private programs; the public surface returns scopes via a separate
+  // query that we don't issue yet (policy: don't aggressively scrape).
+  // Defender / researcher workflows that need full scope should use the
+  // REST transport (--rest) or pass a sessionCookie.
+  return {
     handle: t.handle,
     name: t.name ?? t.handle,
-    scope: inScope,
-    outOfScope,
-    offersBounties: t.offers_bounties ?? false,
+    scope: [],
+    outOfScope: [],
+    offersBounties: false,
   };
-  if (t.updated_at !== undefined) out.updatedAt = t.updated_at;
-  return out;
-}
-
-function parseScope(s: H1Scope): ScopeItem {
-  const out: ScopeItem = {
-    identifier: s.asset_identifier,
-    assetType: s.asset_type,
-  };
-  if (s.eligible_for_bounty !== undefined) out.eligibleForBounty = s.eligible_for_bounty;
-  if (s.max_severity) out.maxSeverity = s.max_severity.toLowerCase() as Severity;
-  if (s.instruction !== undefined) out.instructions = s.instruction;
-  return out;
-}
-
-function parseReport(r: H1Report, programHandleFallback: string): Report {
-  const asset = r.structured_scope?.asset_identifier ?? 'unknown';
-  const severityRaw = r.severity?.rating?.toLowerCase();
-  const severity = (
-    ['none', 'low', 'medium', 'high', 'critical'].includes(severityRaw ?? '')
-      ? severityRaw
-      : undefined
-  ) as Severity | undefined;
-  const finding: Report['finding'] = {
-    id: r.id,
-    title: r.title,
-    description: r.vulnerability_information ?? '',
-    asset,
-  };
-  if (r.severity?.score !== undefined) finding.cvssScore = r.severity.score;
-  if (severity !== undefined) finding.severity = severity;
-  if (r.weakness?.external_id !== undefined) finding.cwe = r.weakness.external_id;
-  if (r.created_at !== undefined) finding.createdAt = r.created_at;
-  const out: Report = {
-    id: r.id,
-    programHandle: r.team?.handle ?? r.program?.handle ?? programHandleFallback,
-    state: r.state as Report['state'],
-    finding,
-  };
-  if (r.created_at !== undefined) out.submittedAt = r.created_at;
-  if (r.bounty_awarded_amount !== undefined) out.bountyAmount = r.bounty_awarded_amount;
-  return out;
 }

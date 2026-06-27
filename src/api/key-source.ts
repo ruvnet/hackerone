@@ -165,18 +165,35 @@ function diagnose(key: string, source: KeyResolution['source']): KeyResolution {
  *
  * Accepted formats:
  *   - "username:token"             → encoded as Basic <base64(username:token)>
- *   - "<pre-encoded-base64>"       → used as Basic <value> directly
+ *   - "<token-only>" + HACKERONE_API_USERNAME env (or `username` opt)
+ *                                  → composed as username:token, then base64
+ *   - "<pre-encoded-base64>" (no `:`, no username available)
+ *                                  → used as Basic <value> directly
  *   - "Basic <pre-encoded>"        → passed through verbatim
+ *
+ * HackerOne's REST + GraphQL endpoints both use Basic auth with the
+ * format `<api-identifier>:<api-token>`. Users frequently store ONLY
+ * the token (44-byte secret) in their .env / Secret Manager and keep
+ * the identifier ("username" in HackerOne terms) elsewhere — accepting
+ * a separate username avoids forcing the awkward `user:token` blob
+ * into the secret store.
  *
  * We DON'T validate the encoded payload itself; HackerOne's API will
  * reject it if malformed, and that error is surfaced upstream.
  */
-export function toBasicAuthHeader(key: string): string {
+export function toBasicAuthHeader(key: string, username?: string): string {
   const trimmed = key.trim();
   if (trimmed.toLowerCase().startsWith('basic ')) return trimmed;
+  // Username explicitly supplied OR available in env → compose then base64.
+  // Skip composition if the key already contains `:` (it's already user:token).
+  const u = username ?? process.env['HACKERONE_API_USERNAME'];
+  if (u && !trimmed.includes(':')) {
+    return 'Basic ' + Buffer.from(`${u.trim()}:${trimmed}`, 'utf-8').toString('base64');
+  }
   if (trimmed.includes(':')) {
     return 'Basic ' + Buffer.from(trimmed, 'utf-8').toString('base64');
   }
-  // Already base64 — caller's problem if it's wrong
+  // No username available, no `:` → treat key as already base64.
+  // Caller's problem if it's wrong (the live ping will return 401).
   return 'Basic ' + trimmed;
 }

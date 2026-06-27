@@ -89,7 +89,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 function pickClient(args: ParsedArgs): { client: ApiClient; mock: boolean; keyDiag: string } {
   const forceMock = args.flags['mock-api'] === true || args.flags['mock-api'] === 'true';
   const noMock = args.flags['no-mock'] === true;
-  const useGraphql = args.flags.graphql === true;
+  // GraphQL is the DEFAULT transport (iter 1 finding: HackerOne's
+  // documented internal API path; X-Auth-Token works for public queries).
+  // REST is the opt-in fallback for the documented public REST surface.
+  const useRest = args.flags.rest === true;
   if (forceMock) {
     return { client: new MockHackerOneClient(), mock: true, keyDiag: 'mock (forced via --mock-api)' };
   }
@@ -100,11 +103,15 @@ function pickClient(args: ParsedArgs): { client: ApiClient; mock: boolean; keyDi
     }
     return { client: new MockHackerOneClient(), mock: true, keyDiag: 'mock (no key found in env/.env/gcp)' };
   }
-  const transport = useGraphql ? 'graphql' : 'rest';
+  const transport = useRest ? 'rest' : 'graphql';
   const diag = `live ${transport} (source=${resolution.source}, len=${resolution.length}, prefix=${resolution.prefix})`;
-  const client: ApiClient = useGraphql
-    ? new HackerOneGraphQLClient({ apiKey: key })
-    : new HackerOneClient({ apiKey: key });
+  const sessionCookie = process.env['HACKERONE_SESSION_COOKIE'];
+  const client: ApiClient = useRest
+    ? new HackerOneClient({ apiKey: key })
+    : new HackerOneGraphQLClient({
+        apiKey: key,
+        ...(sessionCookie ? { sessionCookie } : {}),
+      });
   return { client, mock: false, keyDiag: diag };
 }
 
