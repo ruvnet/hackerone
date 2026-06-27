@@ -83,25 +83,30 @@ grep -q "checkScope" "$ROOT/src/triage/scope-check.ts" || miss="$miss no-check-s
 grep -q "triageReport" "$ROOT/src/triage/triage.ts" || miss="$miss no-triage-orchestrator"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
-step "9. research modules implement cwe-map+scope-analysis+report-format"
+step "9. research modules implement cwe-map+scope-analysis+report-format+redblue-bridge"
 miss=""
-for f in cwe-map.ts scope-analysis.ts report-format.ts recon.ts; do
+for f in cwe-map.ts scope-analysis.ts report-format.ts recon.ts asset-list.ts redblue-bridge.ts; do
   [[ -f "$ROOT/src/research/$f" ]] || miss="$miss missing-$f"
 done
 grep -q "classifyDescription" "$ROOT/src/research/cwe-map.ts" || miss="$miss no-classifier"
 grep -q "CWE-79\|CWE-89\|CWE-918" "$ROOT/src/research/cwe-map.ts" || miss="$miss missing-cwes"
 grep -q "buildReconPlan" "$ROOT/src/research/recon.ts" || miss="$miss no-recon-plan"
 grep -q "formatFinding" "$ROOT/src/research/report-format.ts" || miss="$miss no-format-finding"
+grep -q "toRedblueDraft" "$ROOT/src/research/redblue-bridge.ts" || miss="$miss no-redblue-bridge"
+grep -q "auto_submit: false" "$ROOT/src/research/redblue-bridge.ts" || miss="$miss no-auto-submit-false"
+grep -q "confirmed: opts.reproConfirmed === true" "$ROOT/src/research/redblue-bridge.ts" || miss="$miss no-default-false-repro"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
-step "10. CLI has both surfaces (triage AND scope)"
+step "10. CLI has both surfaces (triage AND scope) + redblue bridge"
 F="$ROOT/src/cli/dispatch.ts"
 miss=""
 grep -q "'triage'" "$F" || miss="$miss no-triage-cmd"
 grep -q "'triage-batch'" "$F" || miss="$miss no-triage-batch-cmd"
 grep -q "'scope'" "$F" || miss="$miss no-scope-cmd"
+grep -q "'assets'" "$F" || miss="$miss no-assets-cmd"
 grep -q "'classify'" "$F" || miss="$miss no-classify-cmd"
 grep -q "'format'" "$F" || miss="$miss no-format-cmd"
+grep -q "'export-redblue'" "$F" || miss="$miss no-export-redblue-cmd"
 grep -q "'programs'" "$F" || miss="$miss no-programs-cmd"
 grep -q "'init'" "$F" || miss="$miss no-init-cmd"
 grep -q "'ping'" "$F" || miss="$miss no-ping-cmd"

@@ -118,4 +118,39 @@ describe('cli dispatch', () => {
     expect(text).toContain('# @metaharness/hackerone');
     expect(text).toContain('api.example.com');
   });
+
+  it('export-redblue emits a HackerOneReportDraft JSON', async () => {
+    const r = await dispatch('export-redblue', ['fixtures/example-finding.json']);
+    expect(r.code).toBe(0);
+    const j = JSON.parse(r.lines.join('\n'));
+    expect(j.draft).toBe(true);
+    expect(j.submission.auto_submit).toBe(false);
+    expect(j.repro.confirmed).toBe(false);
+    expect(j.weakness.cwe[0].id).toBe('CWE-79');
+    expect(j.severity.cvssRating).toBe('High');
+    expect(j.asset).toBe('api.example.com');
+    expect(Array.isArray(j.stepsToReproduce)).toBe(true);
+    expect(j.stepsToReproduce.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('export-redblue --repro-confirmed flips the verification gate (operator-attested)', async () => {
+    const r = await dispatch('export-redblue', [
+      'fixtures/example-finding.json',
+      '--repro-confirmed',
+      '--repro-method', 'reproduced via curl in staging at 15:35',
+    ]);
+    expect(r.code).toBe(0);
+    const j = JSON.parse(r.lines.join('\n'));
+    expect(j.repro.confirmed).toBe(true);
+    expect(j.repro.method).toContain('reproduced via curl');
+  });
+
+  it('export-redblue rejects invalid --family', async () => {
+    const r = await dispatch('export-redblue', [
+      'fixtures/example-finding.json',
+      '--family', 'not-a-real-family',
+    ]);
+    expect(r.code).toBe(2);
+    expect(r.lines.join('\n')).toContain('invalid --family');
+  });
 });

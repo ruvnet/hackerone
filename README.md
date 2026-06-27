@@ -89,6 +89,41 @@ By default the asset list is **in-scope only** — pass
 inert for recon tools, but informative for humans). The `--type` filter
 accepts a comma-separated list of HackerOne asset types.
 
+### Bridge to `@metaharness/redblue` for submit
+
+`@metaharness/redblue@0.1.4` owns the human-gated HackerOne submit verb
+(4 gates: scope / verification / per-report-confirm / no-batch; dry-run
+default; scope verified live; CI/non-interactive refused). `@metaharness/
+hackerone` does **not** reimplement submit. Instead, the bridge subcommand
+emits the exact `HackerOneReportDraft` JSON redblue's submit gate
+consumes, so the recon → triage → draft → submit handoff is one pipe:
+
+```bash
+# Produce a redblue-shaped draft from a finding JSON
+npx hackerone export-redblue fixtures/example-finding.json > draft.json
+
+# Pipe straight into redblue's submit gates (dry-run by default)
+npx hackerone export-redblue fixtures/example-finding.json \
+  | npx redblue submit --in - --dry-run
+```
+
+Defaults are safety-first:
+- `draft.repro.confirmed = false` — redblue's verification gate refuses
+  the draft unless the operator explicitly attests reproduction via
+  `--repro-confirmed --repro-method "<how>"`.
+- `submission.auto_submit = false` — hard-coded sentinel; redblue's
+  submit gate refuses any draft missing this.
+- No submit logic in this package — it just emits the shape.
+
+Flags:
+- `--repro-confirmed` — operator attests they reproduced the finding
+- `--repro-method "<text>"` — how the repro was confirmed (free text)
+- `--asset <id>` — override the asset (must match a live in-scope entry)
+- `--family <enum>` — override the family heuristic (`prompt_injection`
+  / `tool_overreach` / `data_exfiltration` / `role_confusion` /
+  `cost_amplification`); CWE→family heuristic applies otherwise
+- `--recommended-fix "<text>"` — surfaces in the draft
+
 ### Batch classification from stdin
 
 `classify --stdin` reads one finding description per line, emits one

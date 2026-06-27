@@ -32,6 +32,8 @@ import type { ApiClient } from '../api/client.js';
 import { triageReport } from '../triage/triage.js';
 import { buildReconPlan, classifyDescription, formatFinding } from '../research/recon.js';
 import { extractAssets, formatAssetListWithBanner } from '../research/asset-list.js';
+import { toRedblueDraft } from '../research/redblue-bridge.js';
+import type { RedblueAttackFamily } from '../research/redblue-bridge.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -41,7 +43,7 @@ export interface CliResult {
 }
 
 const VALID_SUBS = new Set([
-  'init', 'ping', 'programs', 'scope', 'assets', 'classify', 'triage', 'triage-batch', 'format', 'help',
+  'init', 'ping', 'programs', 'scope', 'assets', 'classify', 'triage', 'triage-batch', 'format', 'export-redblue', 'help',
 ]);
 
 const SAMPLE_ENV = `# @metaharness/hackerone — sample env file
@@ -141,6 +143,8 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
     out('  triage <report-id> [--program H]   Triage one report against history');
     out('  triage-batch <handle>         Triage every open report on a program');
     out('  format <fixture-path>         Format a finding fixture as markdown');
+    out('  export-redblue <fixture-path> Emit a @metaharness/redblue HackerOneReportDraft JSON');
+    out('                                (pipe → `npx redblue submit --in -`)');
     out('');
     out('Common options:');
     out('  --mock-api          Force in-memory mock client (no live API)');
@@ -172,6 +176,7 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
       case 'triage': r = await cmdTriage(parsed, out); break;
       case 'triage-batch': r = await cmdTriageBatch(parsed, out); break;
       case 'format': r = cmdFormat(parsed, out); break;
+      case 'export-redblue': r = cmdExportRedblue(parsed, out); break;
       default: r = { code: 2, lines: [] };
     }
     code = r.code;
@@ -420,6 +425,37 @@ function cmdFormat(args: ParsedArgs, out: (s: string) => void): CliResult {
   if (args.flags.researcher) opts.researcher = String(args.flags.researcher);
   const md = formatFinding(finding, opts);
   out(md);
+  return { code: 0, lines: [] };
+}
+
+/**
+ * export-redblue: emit a JSON HackerOneReportDraft in the shape
+ * @metaharness/redblue@0.1.4's submit gate consumes. Pipe into
+ * `npx redblue submit --in - --dry-run`. The draft's repro.confirmed
+ * defaults to FALSE — redblue's verification gate refuses unconfirmed
+ * drafts, which is the right default since this came from external
+ * classification (not a redblue PoC run).
+ */
+function cmdExportRedblue(args: ParsedArgs, out: (s: string) => void): CliResult {
+  const path = args.positional[0];
+  if (!path) return { code: 2, lines: ['export-redblue: missing fixture path'] };
+  const data = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+  const finding = (data.finding ?? data) as Parameters<typeof toRedblueDraft>[0];
+  const opts: Parameters<typeof toRedblueDraft>[1] = {};
+  if (args.flags['repro-confirmed'] === true) opts.reproConfirmed = true;
+  if (typeof args.flags['repro-method'] === 'string') opts.reproMethod = args.flags['repro-method'];
+  if (typeof args.flags.asset === 'string') opts.asset = args.flags.asset;
+  if (typeof args.flags['recommended-fix'] === 'string') opts.recommendedFix = args.flags['recommended-fix'];
+  if (typeof args.flags.family === 'string') {
+    const fam = args.flags.family as RedblueAttackFamily;
+    if (['prompt_injection','tool_overreach','data_exfiltration','role_confusion','cost_amplification'].includes(fam)) {
+      opts.family = fam;
+    } else {
+      return { code: 2, lines: [`export-redblue: invalid --family "${fam}" (one of: prompt_injection|tool_overreach|data_exfiltration|role_confusion|cost_amplification)`] };
+    }
+  }
+  const draft = toRedblueDraft(finding, opts);
+  out(JSON.stringify(draft, null, 2));
   return { code: 0, lines: [] };
 }
 

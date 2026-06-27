@@ -3,3 +3,4 @@ export * from './scope-analysis.js';
 export * from './report-format.js';
 export * from './recon.js';
 export * from './asset-list.js';
+export * from './redblue-bridge.js';
