@@ -34,6 +34,8 @@ import { buildReconPlan, classifyDescription, formatFinding } from '../research/
 import { extractAssets, formatAssetListWithBanner } from '../research/asset-list.js';
 import { toRedblueDraft } from '../research/redblue-bridge.js';
 import type { RedblueAttackFamily } from '../research/redblue-bridge.js';
+import { toIssue } from '../research/issue-bridge.js';
+import type { IssueKind } from '../research/issue-bridge.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -43,7 +45,8 @@ export interface CliResult {
 }
 
 const VALID_SUBS = new Set([
-  'init', 'ping', 'programs', 'scope', 'assets', 'classify', 'triage', 'triage-batch', 'format', 'export-redblue', 'help',
+  'init', 'ping', 'programs', 'scope', 'assets', 'classify', 'triage', 'triage-batch',
+  'format', 'export-redblue', 'export-issue', 'help',
 ]);
 
 const SAMPLE_ENV = `# @metaharness/hackerone — sample env file
@@ -145,6 +148,8 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
     out('  format <fixture-path>         Format a finding fixture as markdown');
     out('  export-redblue <fixture-path> Emit a @metaharness/redblue HackerOneReportDraft JSON');
     out('                                (pipe → `npx redblue submit --in -`)');
+    out('  export-issue <fixture-path>   Emit Jira / GitHub Issue POST body (pipe → curl)');
+    out('                                Flags: --kind jira|github --project KEY --repo o/n');
     out('');
     out('Common options:');
     out('  --mock-api          Force in-memory mock client (no live API)');
@@ -177,6 +182,7 @@ export async function dispatch(sub: string | undefined, args: string[]): Promise
       case 'triage-batch': r = await cmdTriageBatch(parsed, out); break;
       case 'format': r = cmdFormat(parsed, out); break;
       case 'export-redblue': r = cmdExportRedblue(parsed, out); break;
+      case 'export-issue': r = cmdExportIssue(parsed, out); break;
       default: r = { code: 2, lines: [] };
     }
     code = r.code;
@@ -457,6 +463,43 @@ function cmdExportRedblue(args: ParsedArgs, out: (s: string) => void): CliResult
   const draft = toRedblueDraft(finding, opts);
   out(JSON.stringify(draft, null, 2));
   return { code: 0, lines: [] };
+}
+
+/**
+ * export-issue: emit a Jira / GitHub Issue POST body for a finding,
+ * for the defender-side engineering sync workflow. Pure transform —
+ * no network calls, no token handling. The operator pipes the JSON
+ * to curl to actually create the ticket.
+ *
+ * SAFETY: PII redaction is applied to description + reproduction
+ * before emit (the engineering tracker may have wider access than
+ * the security team). `--skip-pii-redaction` opts out (off by default).
+ */
+function cmdExportIssue(args: ParsedArgs, out: (s: string) => void): CliResult {
+  const path = args.positional[0];
+  if (!path) return { code: 2, lines: ['export-issue: missing fixture path'] };
+  const kindRaw = typeof args.flags.kind === 'string' ? args.flags.kind : 'github';
+  if (kindRaw !== 'jira' && kindRaw !== 'github') {
+    return { code: 2, lines: [`export-issue: invalid --kind "${kindRaw}" (one of: jira|github; default: github)`] };
+  }
+  const kind: IssueKind = kindRaw;
+  const data = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+  const finding = (data.finding ?? data) as Parameters<typeof toIssue>[1];
+  const opts: Parameters<typeof toIssue>[2] = {};
+  if (typeof args.flags.project === 'string') opts.project = args.flags.project;
+  if (typeof args.flags.repo === 'string') opts.repo = args.flags.repo;
+  if (typeof args.flags['issue-type'] === 'string') opts.issueType = args.flags['issue-type'];
+  if (typeof args.flags['report-id'] === 'string') opts.hackeroneReportId = args.flags['report-id'];
+  if (typeof args.flags.labels === 'string') opts.labels = args.flags.labels.split(',').map((l) => l.trim());
+  if (typeof args.flags.assignees === 'string') opts.assignees = args.flags.assignees.split(',').map((a) => a.trim());
+  if (args.flags['skip-pii-redaction'] === true) opts.skipPiiRedaction = true;
+  try {
+    const body = toIssue(kind, finding, opts);
+    out(JSON.stringify(body, null, 2));
+    return { code: 0, lines: [] };
+  } catch (e) {
+    return { code: 2, lines: [`export-issue: ${e instanceof Error ? e.message : String(e)}`] };
+  }
 }
 
 // NOTE: this file is library-only — no bin bootstrap here so callers

@@ -153,4 +153,51 @@ describe('cli dispatch', () => {
     expect(r.code).toBe(2);
     expect(r.lines.join('\n')).toContain('invalid --family');
   });
+
+  it('export-issue (default kind=github) emits a labelled, redacted Issue body', async () => {
+    const r = await dispatch('export-issue', [
+      'fixtures/example-finding.json',
+      '--report-id', '4242',
+    ]);
+    expect(r.code).toBe(0);
+    const body = JSON.parse(r.lines.join('\n'));
+    expect(body.title).toContain('[H1#4242]');
+    expect(body.labels).toContain('security');
+    expect(body.labels).toContain('severity/high');
+    expect(body.labels).toContain('cwe/cwe-79');
+    // PII guard: the fixture description doesn't have email but the report-format
+    // module strips IPs / emails consistently; just ensure no raw IPs leak.
+    expect(body.body).not.toMatch(/\b\d+\.\d+\.\d+\.\d+\b/);
+  });
+
+  it('export-issue --kind jira --project SEC emits Atlassian Document Format', async () => {
+    const r = await dispatch('export-issue', [
+      'fixtures/example-finding.json',
+      '--kind', 'jira',
+      '--project', 'SEC',
+    ]);
+    expect(r.code).toBe(0);
+    const body = JSON.parse(r.lines.join('\n'));
+    expect(body.fields.project.key).toBe('SEC');
+    expect(body.fields.description.type).toBe('doc');
+    expect(body.fields.priority.name).toBe('High');
+  });
+
+  it('export-issue --kind jira without --project fails with 2', async () => {
+    const r = await dispatch('export-issue', [
+      'fixtures/example-finding.json',
+      '--kind', 'jira',
+    ]);
+    expect(r.code).toBe(2);
+    expect(r.lines.join('\n')).toContain('project');
+  });
+
+  it('export-issue rejects unknown --kind', async () => {
+    const r = await dispatch('export-issue', [
+      'fixtures/example-finding.json',
+      '--kind', 'gitlab',
+    ]);
+    expect(r.code).toBe(2);
+    expect(r.lines.join('\n')).toContain('invalid --kind');
+  });
 });

@@ -124,6 +124,58 @@ Flags:
   `cost_amplification`); CWE→family heuristic applies otherwise
 - `--recommended-fix "<text>"` — surfaces in the draft
 
+### Engineering-tracker sync (defender → Jira / GitHub Issues)
+
+When the defender side wants to file an engineering ticket for a
+triaged report, `export-issue` emits the POST body in the right shape;
+the operator pipes to `curl` to actually create the ticket. **No
+automation of the POST itself, no token handling here, no network
+calls** — the harness only produces the payload.
+
+```bash
+# GitHub Issues — POST body to /repos/<o>/<n>/issues
+npx hackerone export-issue finding.json \
+    --kind github \
+    --repo myorg/myrepo \
+    --report-id 4242 \
+    --labels frontend,p1 \
+  | curl -X POST https://api.github.com/repos/myorg/myrepo/issues \
+      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      -H "Accept: application/vnd.github+json" \
+      -d @-
+
+# Jira — POST body to /rest/api/3/issue
+npx hackerone export-issue finding.json \
+    --kind jira \
+    --project SEC \
+    --report-id 4242 \
+  | curl -X POST https://myorg.atlassian.net/rest/api/3/issue \
+      -H "Authorization: Basic $JIRA_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d @-
+```
+
+Defaults:
+- Title is auto-prefixed `[H1#<report-id>]` for searchability +
+  dedup-by-operator.
+- Labels for GitHub: `security`, `severity/<band>`, `cwe/<id>`.
+- Priority for Jira: severity → `Highest|High|Medium|Low|Lowest`.
+- Description is markdown for GitHub, ADF (Atlassian Document Format)
+  for Jira.
+- **PII redaction is on by default** — emails, IPs, phone numbers,
+  CC-shaped digit sequences are stripped before emit. Override with
+  `--skip-pii-redaction`.
+
+Flags:
+- `--kind jira|github` (default: github)
+- `--project KEY` (required for Jira)
+- `--repo owner/name` (GitHub informational)
+- `--report-id <id>` (prepended to title)
+- `--issue-type Bug|Task|…` (Jira)
+- `--labels a,b,c` (additive)
+- `--assignees a,b` (GitHub)
+- `--skip-pii-redaction` (off by default)
+
 ### Batch classification from stdin
 
 `classify --stdin` reads one finding description per line, emits one
