@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npm run smoke
+
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  no-mutations-guard:
+    # Safety regression — verify the GraphQL client never picked up
+    # mutation support. If a future PR adds `mutation` keyword anywhere
+    # in src/api/graphql-client.ts the workflow fails.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for graphql mutations
+        run: |
+          if grep -rE "\bmutation\b" src/api/graphql-client.ts; then
+            echo "::error::graphql-client.ts must remain read-only (no mutations) in v0.1"
+            exit 1
+          fi
+
+  no-credential-leaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for committed secrets
+        run: |
+          # Refuse to merge if any of these patterns ever land in source
+          if grep -rE "(gho_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})" src/ tests/ fixtures/ scripts/ 2>/dev/null; then
+            echo "::error::Credential-shaped strings found in source"
+            exit 1
+          fi
+          # Also refuse a committed .env
+          if [ -f .env ]; then
+            echo "::error::.env file should not be committed"
+            exit 1
+          fi
