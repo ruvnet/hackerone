@@ -1,0 +1,55 @@
+{
+  "name": "@metaharness/hackerone",
+  "version": "0.1.0",
+  "description": "🛡️ HackerOne meta-harness for AI agents — defender-side triage (dedupe, CVSS scoring, scope-check) AND researcher-side recon (scope analysis, OWASP/CWE mapping, report formatting). Safety-contained: no live API by default, mock-mode for $0 CI.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "metaharness-hackerone": "./dist/cli/index.js",
+    "hackerone": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./cli": { "types": "./dist/cli/dispatch.d.ts", "import": "./dist/cli/dispatch.js" },
+    "./triage": { "types": "./dist/triage/index.d.ts", "import": "./dist/triage/index.js" },
+    "./research": { "types": "./dist/research/index.d.ts", "import": "./dist/research/index.js" },
+    "./safety": { "types": "./dist/safety.d.ts", "import": "./dist/safety.js" }
+  },
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "bash scripts/smoke.sh",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "keywords": [
+    "hackerone",
+    "bug-bounty",
+    "vulnerability-management",
+    "triage",
+    "cvss",
+    "cwe",
+    "owasp",
+    "ai-agents",
+    "agent-harness",
+    "metaharness",
+    "security",
+    "defensive-security",
+    "vdp"
+  ],
+  "author": "rUv <ruv@ruv.net>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruvnet/hackerone#readme",
+  "repository": { "type": "git", "url": "https://github.com/ruvnet/hackerone.git" },
+  "bugs": { "url": "https://github.com/ruvnet/hackerone/issues" },
+  "engines": { "node": ">=20.0.0" },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "publishConfig": { "access": "public" }
+}

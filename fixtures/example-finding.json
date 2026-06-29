@@ -1,0 +1,13 @@
+{
+  "id": "fixture-xss-1",
+  "title": "Reflected XSS in /search?q=",
+  "description": "The `q` query parameter is reflected unescaped into the search results page. Payload: `\"><img src=x onerror=alert(1)>` triggers JavaScript execution in the rendered HTML.",
+  "asset": "api.example.com",
+  "cwe": "CWE-79",
+  "owasp": "A03:2021",
+  "severity": "high",
+  "cvssScore": 7.4,
+  "cvssVector": "AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+  "reproduction": "1. GET https://api.example.com/search?q=\"><img src=x onerror=alert(1)>\n2. Open the rendered page\n3. Observe alert(1) fires in the user's browser",
+  "createdAt": "2026-06-27T15:30:00Z"
+}
